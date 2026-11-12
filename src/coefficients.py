@@ -3,25 +3,26 @@
 S6* MASTER CERTIFIED COEFFICIENTS CATALOG (ACTIVE S6* FAMILY COEFFICIENTS)
 ===================================================================================================
 Contains high-precision certified coefficients (computed to 25-30 decimal digits, stored in IEEE-754
-float64 / complex128) for all seven members of the S6* geometric splitting framework across three branches,
+float64 / complex128) for all eight members of the S6* geometric splitting framework across three branches,
 plus the retained classical external baselines (NOT family members):
 
 BRANCH I: S6* REAL GEOMETRIC FAMILY (Unitary, Hamiltonian, Symplectic Waves)
   1. S6* Real-Standard-33 (33 FFT transforms/step): Full spectral double commutator evaluation
   2. S6* Real-Stencil-12  (12 FFT transforms/step): 8th-order compact central difference spatial stencils
+  3. S6* Real-Manifold-33 (33 FFT transforms/step): Manifold re-optimization of the Real root (a1 = -0.108, 2026-10-09; J = 1.3281, worst cumsum -0.3281)
   (Classical baseline Yoshida-6 (1990), 14 FFTs/step FSAL, lives in YOSHIDA_6_* — NOT a family member.)
 
 BRANCH II: S6* COMPLEX GEOMETRIC FAMILY (Parabolic, Dissipative & Ground-State Relaxation)
-  3. S6* Complex-Standard-32 (32 FFT transforms/step): Canonical 13-stage free-Lie splitting (2-point Gauss)
-  4. S6* Complex-Flash-22    (22 FFT transforms/step): 13-stage midpoint subflow spectral commutator
-  5. S6* Complex-Stencil-12  (12 FFT transforms/step): 6-stage forward-positive with 8th-order spatial stencils
+  4. S6* Complex-Standard-32 (32 FFT transforms/step): Canonical 13-stage free-Lie splitting (2-point Gauss)
+  5. S6* Complex-Flash-22    (22 FFT transforms/step): 13-stage midpoint subflow spectral commutator
+  6. S6* Complex-Stencil-12  (12 FFT transforms/step): 6-stage forward-positive with 8th-order spatial stencils
   (Classical baselines BCChM-6 P6S7 (2013), 14 FFTs/step FSAL, lives in BCCHM_6_*; and Castella-Blanes (2009),
   20 FFTs/macro-step h, lives in CASTELLA_BLANES_* — NOT family members; formerly mislabeled as
   'Complex-Bullet-14' and 'Complex-Instant-10', pruned from the registry 2026-11-07.)
 
 BRANCH III: S6* SIMPLEX GEOMETRY-NATIVE FAMILY (2D Simplicial Meshes over K in {R, C})
-  6. S6* Simplex-Commutator (96 K-SpMVs + 96 C-SpMVs asymptotically at m=16): exact discrete commutator
-  7. Simplex-Yoshida-6 (112 SpMVs/step): classical Yoshida-6 composition on simplicial FE geometry
+  7. S6* Simplex-Commutator (96 K-SpMVs + 96 C-SpMVs asymptotically at m=16): exact discrete commutator
+  8. Simplex-Yoshida-6 (112 SpMVs/step): classical Yoshida-6 composition on simplicial FE geometry
 ===================================================================================================
 """
 
@@ -48,6 +49,32 @@ S6_REAL_C = np.array([
      0.0020779453075789, -0.0013562328631281,  0.0008663958703609, -0.0083863408805925,
      0.0008663958703609, -0.0013562328631281,  0.0020779453075789
 ], dtype=np.float64)
+
+# -------------------------------------------------------------------------------------------------
+# 1.1b Manifold re-optimization of the Real root (a1 = -0.108, 2026-10-09)
+# -------------------------------------------------------------------------------------------------
+# Minimizer of J = max|cumsum| on the certified 1D branch (traced a1 in [-2.50, -0.108],
+# 239 points, residuals ~1e-17; 40-digit refinement, max residual 1.9e-42). J = 1.3281
+# (old 1.7378), worst cumsum -0.3281 (old -0.7378, 2.25x). Same 13-stage symmetric
+# ansatz, same order 6; a NEW point on the certified branch, NOT a new method.
+# Validated 2026-11-12 on the gate toy (double well + rotational carrier): observed
+# order 5.96/5.99, reversibility 2.33e-15 at T=6 h=0.05, errors ~2.5x smaller than
+# Standard-33 at the same h. Source: s6star-manifold/REPORT.md + coeffs_new.npz.
+S6_REAL_MANIFOLD_A = np.array([
+    -0.1080000000000000, -0.2201391365922932, 0.8281391365922932,
+     0.8281391365922932, -0.2201391365922932, -0.1080000000000000
+], dtype=np.float64)
+
+S6_REAL_MANIFOLD_B = np.array([
+     0.4380131147258101, -0.2173152310393382, 0.0182221385458947, 0.5221599555352670,
+     0.0182221385458947, -0.2173152310393382, 0.4380131147258101
+], dtype=np.float64)
+
+S6_REAL_MANIFOLD_C = np.array([
+     0.0035153173016543, -0.0001620959032421, 0.0005539117349793, -0.0050078862355022,
+     0.0005539117349793, -0.0001620959032421, 0.0035153173016543
+], dtype=np.float64)
+
 
 # -------------------------------------------------------------------------------------------------
 # 1.2 Canonical Complex-S6* Root (Root 11, Forward-Positive Re(a_k) > 0, c1 = c7 = 0)
@@ -112,6 +139,12 @@ REAL_STANDARD_33_A = S6_REAL_A
 REAL_STANDARD_33_B = S6_REAL_B
 REAL_STANDARD_33_C = S6_REAL_C
 REAL_STANDARD_33_FFTS = 33
+
+# MEMBER 2: S6* Real-Manifold-33 (33 FFT transforms/step) — manifold re-optimization (a1 = -0.108, 2026-10-09)
+REAL_MANIFOLD_33_A = S6_REAL_MANIFOLD_A
+REAL_MANIFOLD_33_B = S6_REAL_MANIFOLD_B
+REAL_MANIFOLD_33_C = S6_REAL_MANIFOLD_C
+REAL_MANIFOLD_33_FFTS = 33
 
 # MEMBER 3: Yoshida-6 (Classical Recursive Composition Baseline, Yoshida 1990; 14 FFTs/step FSAL)
 # Explicit attribution: Haruo Yoshida (1990, Phys. Lett. A 150, 262). Retained as pure splitting baseline.

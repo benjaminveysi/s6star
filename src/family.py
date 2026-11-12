@@ -2,7 +2,7 @@
 ===================================================================================================
 S6* FAMILY REGISTRY & UNIFIED METADATA (AUDITED & CERTIFIED)
 ===================================================================================================
-Provides verified architectural metadata and honest cost metrics for all 7 members of the S6*
+Provides verified architectural metadata and honest cost metrics for all 8 members of the S6*
 framework across the three physical branches (pruned 2026-10-09: Real-Pure-14/Yoshida-6
 removed from the registry — it is a classical baseline, not a family member; pruned 2026-11-07:
 Complex-Bullet-14/BCChM-6 and Complex-Instant-10/Castella-Blanes removed from the registry —
@@ -11,6 +11,7 @@ attribution, see coefficients.py):
 
 Branch I: Real Family (Hamiltonian, Unitary Waves)
 - S6_REAL_STANDARD_33
+- S6_REAL_MANIFOLD_33
 - S6_REAL_STENCIL_12
 
 Branch II: Complex Family (Parabolic, Dissipative Systems)
@@ -25,6 +26,7 @@ Branch III: Simplex Family (2D Simplicial Meshes)
 
 from src.coefficients import (
     REAL_STANDARD_33_A, REAL_STANDARD_33_B, REAL_STANDARD_33_C,
+    REAL_MANIFOLD_33_A, REAL_MANIFOLD_33_B, REAL_MANIFOLD_33_C,
     REAL_STENCIL_12_A, REAL_STENCIL_12_B, REAL_STENCIL_12_C,
     COMPLEX_STANDARD_32_A, COMPLEX_STANDARD_32_B, COMPLEX_STANDARD_32_C,
     COMPLEX_FLASH_22_A, COMPLEX_FLASH_22_B, COMPLEX_FLASH_22_C,
@@ -46,6 +48,19 @@ S6_FAMILY_MEMBERS = {
         "gradient_free": False,
         "provenance": "Canonical 13-stage free-Lie splitting (a1 = -0.50)",
         "coefficients": (REAL_STANDARD_33_A, REAL_STANDARD_33_B, REAL_STANDARD_33_C)
+    },
+    "S6* Real-Manifold-33": {
+        "id": "real_manifold_33",
+        "branch": "Real",
+        "physics": "Hamiltonian / Unitary Waves",
+        "order": 6,
+        "cost_per_step": 33,
+        "cost_unit": "FFT transforms",
+        "cost_pairs": 16.5,
+        "commutator_type": "Full Spectral (21 transforms)",
+        "gradient_free": False,
+        "provenance": "Manifold re-optimization 2026-10-09: minimizer of J=max|cumsum| on the certified branch (a1=-0.108); worst cumsum -0.3281 vs -0.7378 (2.25x). Validated 2026-11-12 on the gate toy (double well + rotational carrier): observed order 5.96/5.99, reversibility 2.33e-15 at T=6 h=0.05, errors ~2.5x smaller than Standard-33 at the same h",
+        "coefficients": (REAL_MANIFOLD_33_A, REAL_MANIFOLD_33_B, REAL_MANIFOLD_33_C)
     },
     "S6* Real-Stencil-12": {
         "id": "real_stencil_12",

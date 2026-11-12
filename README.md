@@ -13,6 +13,7 @@ Designed for high-precision Hamiltonian wave dynamics and stiff parabolic flows 
 - **Exact Nonlinear Phase Integration:** For Gross–Pitaevskii (GPE) systems, the double commutator `G2 = [B, [B, A]]` drops spatial phase dependencies. The nonlinear step integrates via exact pointwise phase rotation—no internal ODE solvers needed.
 - **Zero-Overhead Reversible Adaptivity:** Uses a time-reversible harmonic step controller (Hairer–Söderlind) that prevents secular energy and phase drift during soliton collisions. Recycles gradients in-place with **zero extra FFTs** per macro-step.
 - **Parabolic Stability via Complex Splitting:** Bypasses the Sheng–Suzuki barrier for diffusion and imaginary-time GPE relaxation using forward-positive complex substeps (`Re(a_j) > 0`, `Re(b_j) > 0`) inside a narrow 18.4° sector. Where standard real-valued 4th/6th-order methods hit backward-heat `NaN` blowups, Complex-S6* stays rock solid.
+- **Real-Manifold-33 (new in v16.4):** manifold re-optimization of the Real root (a1 = -0.108, 2026-10-09). Same 6th order, errors about 2.5x smaller than Standard-33 on the gate toy, reversibility 2.33e-15. Standard-33 (a1 = -0.50) stays the certified default.
 
 ## Benchmark Snapshot
 
