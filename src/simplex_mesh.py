@@ -248,9 +248,10 @@ class SimplexMesh2D:
         self.spmv_count += 1
         return self.inv_M_diag * self.K.dot(u)
 
-    def apply_commutator(self, u):
+    def apply_commutator(self, u, C_mat=None):
         """Apply the assembled discrete double commutator C to u."""
-        if self._commutator_matrix is None:
+        mat = C_mat if C_mat is not None else self._commutator_matrix
+        if mat is None:
             return np.zeros_like(u)
         self.commutator_spmv_count += 1
-        return self._commutator_matrix.dot(u)
+        return mat.dot(u)

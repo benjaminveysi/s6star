@@ -9,6 +9,7 @@ from typing import Literal
 import numpy as np
 from src.coefficients_simplex import (
     S6_SIMPLEX_COMM_A, S6_SIMPLEX_COMM_B, S6_SIMPLEX_COMM_C,
+    S6_SIMPLEX_MANIFOLD_A, S6_SIMPLEX_MANIFOLD_B, S6_SIMPLEX_MANIFOLD_C,
     S6_SIMPLEX_PARAB_A, S6_SIMPLEX_PARAB_B, S6_SIMPLEX_PARAB_C,
     YOSHIDA_6_A, YOSHIDA_6_B, BCCHM_6_A, BCCHM_6_B,
 )
@@ -69,6 +70,18 @@ def make_policy(evolution: str, field: str, scheme: str | None = None) -> Simple
             raise ValueError(
                 "Hamiltonian evolution uses exp(-i h H) and therefore requires a complex field. "
                 "Use field='complex' or choose a parabolic evolution for a real field."
+            )
+        if scheme in {"manifold", "s6_manifold", "manifold_commutator"}:
+            return SimplexEvolutionPolicy(
+                name="hamiltonian-s6-manifold-commutator",
+                generator=-1j,
+                stages_a=np.asarray(S6_SIMPLEX_MANIFOLD_A, dtype=float),
+                stages_b=np.asarray(S6_SIMPLEX_MANIFOLD_B, dtype=float),
+                stages_c=np.asarray(S6_SIMPLEX_MANIFOLD_C, dtype=float),
+                uses_commutator=True,
+                requires_complex_field=True,
+                internal_complex=True,
+                description="Cumulative-noise manifold-optimized (a1=-0.108) 13-stage S6* commutator-corrected Hamiltonian evolution.",
             )
         return SimplexEvolutionPolicy(
             name="hamiltonian-s6-commutator",

@@ -32,7 +32,7 @@ class SimplexSolver:
     """
     def __init__(
         self, mesh, field_type='complex', theta=0.0, V=None, scheme=None,
-        *, field=None, evolution=None, real_projection_tol=1e-12
+        *, field=None, evolution=None, real_projection_tol=1e-12, m_krylov_B=None
     ):
         self.mesh = mesh
         self.field = (field if field is not None else field_type).lower()
@@ -46,13 +46,14 @@ class SimplexSolver:
         self.field_type = self.field  # backward-compatible attribute
         self.theta = theta
         self.real_projection_tol = real_projection_tol
+        self.m_krylov_B = m_krylov_B
 
         # Infer a legacy policy only when the new explicit evolution argument is omitted.
         if evolution is None:
             if scheme is None:
                 evolution = 'hamiltonian' if self.field == 'complex' else 'parabolic'
                 scheme = None if evolution == 'parabolic' else 's6_commutator'
-            elif scheme.lower() in {'s6_commutator', 'commutator', 's6'}:
+            elif scheme.lower() in {'s6_commutator', 'commutator', 's6', 'manifold', 's6_manifold', 'manifold_commutator'}:
                 evolution = 'hamiltonian' if self.field == 'complex' else 'parabolic'
             elif scheme.lower() in {'bcchm'}:
                 evolution = 'legacy'
@@ -85,7 +86,6 @@ class SimplexSolver:
             self.mesh._commutator_matrix = self.C_mat
         else:
             self.C_mat = None
-            self.mesh._commutator_matrix = None
 
     @property
     def uses_commutator(self):
@@ -209,7 +209,32 @@ class SimplexSolver:
         # (Pure scalar — bitwise identical result.)
         h2_c = (h * h) * c_val
         def apply_B(x):
-            return b_val * (self.V * x) + h2_c * self.mesh.apply_commutator(x)
+            return b_val * (self.V * x) + h2_c * self.mesh.apply_commutator(x, self.C_mat)
+
+        if m <= 6 and not needs_arnoldi:
+            # Fast C-SpMV realization (e.g. m_B=4 -> 2+2=4 C-SpMVs/stage):
+            # 2-node Gauss-Legendre symmetric B-stage composition (O(h^7) local fidelity)
+            # B_j(h) = e^{xi1*sigma*h*b_j*V} e^{0.5*sigma*h^3*c_j*C} e^{(1-2*xi1)*sigma*h*b_j*V} e^{0.5*sigma*h^3*c_j*C} e^{xi1*sigma*h*b_j*V}
+            # with xi1 = (1 - 1/sqrt(3))/2, which cancels the O(h^5) [V,[V,C]] BCH error identically
+            # while isolating the O(h^3) commutator in two m_half = max(m // 2, 1) Lanczos projections.
+            xi1 = 0.21132486540518713  # (1 - 1/sqrt(3)) / 2
+            xi2 = 0.5773502691896257   # 1 - 2*xi1 = 1/sqrt(3)
+            e1 = np.exp((xi1 * b_val * h) * self.policy.generator * self.V)
+            e2 = np.exp((xi2 * b_val * h) * self.policy.generator * self.V)
+            half_h2_c = 0.5 * h2_c
+            m_half = max(m // 2, 1)
+            def apply_C_half(x):
+                return half_h2_c * self.mesh.apply_commutator(x, self.C_mat)
+            v = e1 * np.asarray(u, dtype=self.scalar_dtype)
+            v = self._exponential_action_m_inner(
+                v, h, apply_C_half, m=m_half, sign=self.policy.generator, hermitian=True
+            )
+            v = e2 * v
+            v = self._exponential_action_m_inner(
+                v, h, apply_C_half, m=m_half, sign=self.policy.generator, hermitian=True
+            )
+            out = e1 * v
+            return np.real(out) if self.field == 'real' else out
 
         # NOTE (do not "simplify" to Lanczos): with complex stage coefficients
         # the stage generator b_j*V + h^2*c_j*C is not M-self-adjoint, so the
@@ -283,29 +308,38 @@ class SimplexSolver:
         # tolerance is far above this.)
         return coeffs @ basis[:len(coeffs)]
 
+    def _resolve_m_B(self, m_krylov, m_krylov_B=None):
+        if m_krylov_B is not None:
+            return m_krylov_B
+        if self.m_krylov_B is not None:
+            return self.m_krylov_B
+        return m_krylov
+
     def _apply_stage(self, v, idx, h, m_krylov, tol, adaptive, step_scaled_tol,
-                     adaptive_check_every=1):
-        v = self.potential_step(v, self.stages_b[idx], h, c_val=self.stages_c[idx], m_krylov=m_krylov)
+                     adaptive_check_every=1, m_krylov_B=None):
+        eff_m_B = self._resolve_m_B(m_krylov, m_krylov_B)
+        v = self.potential_step(v, self.stages_b[idx], h, c_val=self.stages_c[idx], m_krylov=eff_m_B)
         return self.kinetic_step_lanczos(
             v, self.stages_a[idx], h, m=m_krylov, tol=tol, adaptive=adaptive,
             step_scaled_tol=step_scaled_tol, adaptive_check_every=adaptive_check_every
         )
 
     def step_simplex_s6(self, u, h, m_krylov=16, tol=1e-13, adaptive=False,
-                        step_scaled_tol=True, adaptive_check_every=1):
+                        step_scaled_tol=True, adaptive_check_every=1, m_krylov_B=None):
         """Single macro-step through the policy-selected splitting on the common engine."""
+        eff_m_B = self._resolve_m_B(m_krylov, m_krylov_B)
         v = np.asarray(u, dtype=self.scalar_dtype).copy()
         if self.policy.uses_commutator:
             for idx in range(6):
                 v = self._apply_stage(v, idx, h, m_krylov, tol, adaptive, step_scaled_tol,
-                                      adaptive_check_every)
-            v = self.potential_step(v, self.stages_b[6], h, c_val=self.stages_c[6], m_krylov=m_krylov)
+                                      adaptive_check_every, m_krylov_B=eff_m_B)
+            v = self.potential_step(v, self.stages_b[6], h, c_val=self.stages_c[6], m_krylov=eff_m_B)
         else:
             v = self.kinetic_step_lanczos(v, self.stages_a[0], h, m=m_krylov, tol=tol, adaptive=adaptive,
                                           step_scaled_tol=step_scaled_tol,
                                           adaptive_check_every=adaptive_check_every)
             for idx in range(7):
-                v = self.potential_step(v, self.stages_b[idx], h, c_val=0.0, m_krylov=m_krylov)
+                v = self.potential_step(v, self.stages_b[idx], h, c_val=0.0, m_krylov=eff_m_B)
                 v = self.kinetic_step_lanczos(v, self.stages_a[idx + 1], h, m=m_krylov, tol=tol,
                                               adaptive=adaptive, step_scaled_tol=step_scaled_tol,
                                               adaptive_check_every=adaptive_check_every)
@@ -326,14 +360,14 @@ class SimplexSolver:
         return v
 
     def _step_no_fusion(self, v, h, m_krylov, tol, adaptive, step_scaled_tol,
-                          adaptive_check_every=1):
+                          adaptive_check_every=1, m_krylov_B=None):
         return self.step_simplex_s6(
             v, h, m_krylov=m_krylov, tol=tol, adaptive=adaptive, step_scaled_tol=step_scaled_tol,
-            adaptive_check_every=adaptive_check_every
+            adaptive_check_every=adaptive_check_every, m_krylov_B=m_krylov_B
         )
 
     def integrate_simplex_s6(self, u0, n_steps, h, m_krylov=16, tol=1e-13, use_fsal=True,
-                             adaptive=False, step_scaled_tol=True, adaptive_check_every=1):
+                             adaptive=False, step_scaled_tol=True, adaptive_check_every=1, m_krylov_B=None):
         """Integrate multiple macro-steps using exact boundary fusion where the policy permits it.
 
         FSAL exactness note (do not "fix" the 2.0 factors): the map starts and
@@ -343,6 +377,7 @@ class SimplexSolver:
         approximation — halving the factors would silently drop half the
         boundary potential.
         """
+        eff_m_B = self._resolve_m_B(m_krylov, m_krylov_B)
         v = np.asarray(u0, dtype=self.scalar_dtype).copy()
         if n_steps <= 0:
             return self._format_output(v)
@@ -352,10 +387,10 @@ class SimplexSolver:
             if not use_fsal or n_steps == 1:
                 for _ in range(n_steps):
                     v = self._step_no_fusion(v, h, m_krylov, tol, adaptive, step_scaled_tol,
-                                             adaptive_check_every)
+                                             adaptive_check_every, m_krylov_B=eff_m_B)
                 return v
 
-            v = self.potential_step(v, self.stages_b[0], h, c_val=self.stages_c[0], m_krylov=m_krylov)
+            v = self.potential_step(v, self.stages_b[0], h, c_val=self.stages_c[0], m_krylov=eff_m_B)
             for step in range(n_steps):
                 for idx in range(6):
                     v = self.kinetic_step_lanczos(
@@ -364,15 +399,15 @@ class SimplexSolver:
                     )
                     if idx < 5:
                         v = self.potential_step(
-                            v, self.stages_b[idx + 1], h, c_val=self.stages_c[idx + 1], m_krylov=m_krylov
+                            v, self.stages_b[idx + 1], h, c_val=self.stages_c[idx + 1], m_krylov=eff_m_B
                         )
                     elif step < n_steps - 1:
                         v = self.potential_step(
-                            v, 2.0 * self.stages_b[6], h, c_val=2.0 * self.stages_c[6], m_krylov=m_krylov
+                            v, 2.0 * self.stages_b[6], h, c_val=2.0 * self.stages_c[6], m_krylov=eff_m_B
                         )
                     else:
                         v = self.potential_step(
-                            v, self.stages_b[6], h, c_val=self.stages_c[6], m_krylov=m_krylov
+                            v, self.stages_b[6], h, c_val=self.stages_c[6], m_krylov=eff_m_B
                         )
             return self._format_output(v)
 
