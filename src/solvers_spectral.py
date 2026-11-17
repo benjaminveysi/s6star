@@ -24,6 +24,7 @@ Provides production-grade spectral solver classes for the 7 Cartesian/Fourier me
 import numpy as np
 from src.coefficients import (
     REAL_STANDARD_33_A, REAL_STANDARD_33_B, REAL_STANDARD_33_C,
+    REAL_MANIFOLD_33_A, REAL_MANIFOLD_33_B, REAL_MANIFOLD_33_C,
     YOSHIDA_6_A, YOSHIDA_6_B, YOSHIDA6_W,
     REAL_STENCIL_12_A, REAL_STENCIL_12_B, REAL_STENCIL_12_C,
     STENCIL_D, STENCIL_D2, STENCIL_D2_CENTER,
@@ -36,7 +37,7 @@ from src.coefficients import (
 
 class RealGPESolver:
     """1D/2D Focusing/Defocusing Gross-Pitaevskii Equation Solver for Hamiltonian Waves."""
-    def __init__(self, N=2048, L=80.0, theta=-2.0, V=None, Vx=None):
+    def __init__(self, N=2048, L=80.0, theta=-2.0, V=None, Vx=None, Vxx=None):
         self.N = N
         self.L = L
         self.theta = theta
@@ -51,6 +52,7 @@ class RealGPESolver:
         if V is None:
             self.V = np.zeros(N, dtype=float)
             self.Vx = np.zeros(N, dtype=float)
+            self.Vxx = np.zeros(N, dtype=float)
         elif callable(V):
             self.V = V(self.x)
             if Vx is not None:
@@ -59,6 +61,11 @@ class RealGPESolver:
                 # Spectral derivative for smooth periodic potentials
                 V_hat = np.fft.fft(self.V)
                 self.Vx = np.fft.ifft(self.ik * V_hat).real
+            if Vxx is not None:
+                self.Vxx = Vxx(self.x) if callable(Vxx) else np.array(Vxx, dtype=float)
+            else:
+                V_hat = np.fft.fft(self.V)
+                self.Vxx = np.fft.ifft(self.minus_k2 * V_hat).real
         else:
             self.V = np.array(V, dtype=float)
             if Vx is not None:
@@ -66,6 +73,11 @@ class RealGPESolver:
             else:
                 V_hat = np.fft.fft(self.V)
                 self.Vx = np.fft.ifft(self.ik * V_hat).real
+            if Vxx is not None:
+                self.Vxx = Vxx(self.x) if callable(Vxx) else np.array(Vxx, dtype=float)
+            else:
+                V_hat = np.fft.fft(self.V)
+                self.Vxx = np.fft.ifft(self.minus_k2 * V_hat).real
 
     def reset_fft_count(self):
         self.fft_count = 0
@@ -91,14 +103,21 @@ class RealGPESolver:
         return norm, E_kin + E_pot + E_int
 
     def compute_f1_f2_spectral(self, psi):
-        """Computes complete double commutator [V_eff, [T, V_eff]] for V_eff = V(x) + theta |psi|^2.
-        
-        Mathematical Formulation:
-            T = -d^2/dx^2, V_eff = V(x) + theta * rho(x)
-            [V_eff, [T, V_eff]] = 2 |d(V_eff)/dx|^2 + nonlinear GPE variation terms.
+        """Computes the exact Frechet double commutator G2 = [F2, [F2, F1]] for the GPE.
+
+        Mathematical Formulation (master record §7):
+            T = -d^2/dx^2, F2(psi) = -i (V(x) + theta * rho(x)) psi, rho = |psi|^2
+            f2(psi) = 2 |V_x|^2 - 4 * theta * rho * V_xx
+                      - 4 * theta^2 * (2 * rho * Re(conj(psi) * Delta psi)
+                                       + 3 * rho * |grad psi|^2
+                                       + Re(conj(psi)^2 * (grad psi)^2))
             - Pure potential contribution: + 2 * (V_x)^2
-            - Cross contribution: + 4 * theta * V_x * rho_x
-            - Pure nonlinear contribution: - 4 * theta * g6
+            - Cross contribution (Frechet variation): - 4 * theta * rho * V_xx
+            - Pure nonlinear contribution: - 4 * theta^2 * (...)
+        NOTE: the cross term is -4*theta*rho*V_xx, NOT +4*theta*V_x*rho_x.
+        Treating V_eff = V + theta*rho as a frozen linear potential gives the
+        wrong cross term and drops the order from 6 to 2 whenever
+        theta != 0 AND V(x) != 0 simultaneously.
         """
         psi_hat = self.fft(psi)
         grad_psi = self.ifft(self.ik * psi_hat)
@@ -106,18 +125,17 @@ class RealGPESolver:
 
         v_conj = np.conj(psi)
         rho = psi.real**2 + psi.imag**2
-        rho_x = 2.0 * (v_conj * grad_psi).real
 
         g2 = (v_conj * Delta_psi).real
         g3 = (np.conj(grad_psi) * grad_psi).real
         g4 = ((v_conj**2) * (grad_psi**2)).real
 
         g5 = self.theta * (2.0 * g2 + 3.0 * g3)
-        g6 = rho * g5 + self.theta * g4
+        g6 = rho * (self.Vxx + g5) + self.theta * g4
 
         f1 = self.theta * rho + self.V
-        # Complete commutator for arbitrary V(x) and theta:
-        f2 = -4.0 * self.theta * g6 + 2.0 * (self.Vx ** 2) + 4.0 * self.theta * self.Vx * rho_x
+        # Complete Frechet commutator for arbitrary V(x) and theta:
+        f2 = 2.0 * (self.Vx ** 2) - 4.0 * self.theta * g6
         return f1, f2
 
     def compute_f1_f2_stencil(self, psi):
@@ -138,17 +156,16 @@ class RealGPESolver:
 
         v_conj = np.conj(psi)
         rho = psi.real**2 + psi.imag**2
-        rho_x = 2.0 * (v_conj * grad_psi).real
 
         g2 = (v_conj * Delta_psi).real
         g3 = (np.conj(grad_psi) * grad_psi).real
         g4 = ((v_conj**2) * (grad_psi**2)).real
 
         g5 = self.theta * (2.0 * g2 + 3.0 * g3)
-        g6 = rho * g5 + self.theta * g4
+        g6 = rho * (self.Vxx + g5) + self.theta * g4
 
         f1 = self.theta * rho + self.V
-        f2 = -4.0 * self.theta * g6 + 2.0 * (self.Vx ** 2) + 4.0 * self.theta * self.Vx * rho_x
+        f2 = 2.0 * (self.Vx ** 2) - 4.0 * self.theta * g6
         return f1, f2
 
     def step_standard_33(self, psi, h):
@@ -164,6 +181,22 @@ class RealGPESolver:
         v *= np.exp(-1j * theta_p)
         return v
 
+    def step_manifold_33(self, psi, h):
+        """S6* Real-Manifold-33 (a1 = -0.108): re-optimized on the 1D solution
+        manifold with the correct functional J = max|cumsum(a)|. Same 33-FFT
+        structure as Standard-33; ~2.5x smaller errors at the same h."""
+        v = psi.copy()
+        h2 = h * h
+        for idx in range(6):
+            f1, f2 = self.compute_f1_f2_spectral(v)
+            theta_p = h * (REAL_MANIFOLD_33_B[idx] * f1 + REAL_MANIFOLD_33_C[idx] * h2 * f2)
+            v *= np.exp(-1j * theta_p)
+            v = self.ifft(self.fft(v) * np.exp(REAL_MANIFOLD_33_A[idx] * h * self.disp_k))
+        f1, f2 = self.compute_f1_f2_spectral(v)
+        theta_p = h * (REAL_MANIFOLD_33_B[6] * f1 + REAL_MANIFOLD_33_C[6] * h2 * f2)
+        v *= np.exp(-1j * theta_p)
+        return v
+
     def step_stencil_12(self, psi, h):
         v = psi.copy()
         h2 = h * h
@@ -174,6 +207,22 @@ class RealGPESolver:
             v = self.ifft(self.fft(v) * np.exp(REAL_STENCIL_12_A[idx] * h * self.disp_k))
         f1, f2 = self.compute_f1_f2_stencil(v)
         theta_p = h * (REAL_STENCIL_12_B[6] * f1 + REAL_STENCIL_12_C[6] * h2 * f2)
+        v *= np.exp(-1j * theta_p)
+        return v
+
+    def step_manifold_stencil_12(self, psi, h):
+        """S6* Real-Manifold-Stencil-12 (a1 = -0.108, 12 FFTs/step): pairs the
+        manifold-reoptimized root (J = max|cumsum(a)| = 1.3281) with the 8th-order
+        coordinate-space stencil (0 FFTs for f2)."""
+        v = psi.copy()
+        h2 = h * h
+        for idx in range(6):
+            f1, f2 = self.compute_f1_f2_stencil(v)
+            theta_p = h * (REAL_MANIFOLD_33_B[idx] * f1 + REAL_MANIFOLD_33_C[idx] * h2 * f2)
+            v *= np.exp(-1j * theta_p)
+            v = self.ifft(self.fft(v) * np.exp(REAL_MANIFOLD_33_A[idx] * h * self.disp_k))
+        f1, f2 = self.compute_f1_f2_stencil(v)
+        theta_p = h * (REAL_MANIFOLD_33_B[6] * f1 + REAL_MANIFOLD_33_C[6] * h2 * f2)
         v *= np.exp(-1j * theta_p)
         return v
 
