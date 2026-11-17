@@ -4,9 +4,8 @@ MODULE 7: S6* REAL GEOMETRIC SPLITTING FAMILY GRAND COMPARATIVE BENCHMARK SUITE
 ===================================================================================================
 Evaluates the optimized Real-S6* family for conservative, unitary, and Hamiltonian wave dynamics:
 1. S6* Real-Stencil-12 (12 FFTs/step): 6-Stage S6* with 8th-Order Compact Spatial Stencils
-2. S6* Real-Pure-14 (14 FFTs/step): 7-Stage Symmetric T-V-T Pure Splitting with FSAL
-4. S6* Real-Standard-33 (33 FFTs/step): Canonical 13-Stage Commutator-Corrected Splitting
-5. Yoshida-6 (14 FFTs/step): 6th-Order Symmetric Composition (Yoshida 1990)
+2. S6* Real-Standard-33 (33 FFTs/step): Canonical 13-Stage Commutator-Corrected Splitting
+3. Yoshida-6 (14 FFTs/step): 6th-Order Symmetric Composition (Yoshida 1990)
 6. Chin-4A (8 FFTs/step): 4th-Order Commutator-Corrected Splitting (Chin 1997)
 7. Strang (2 FFTs/step): 2nd-Order Symmetric Splitting
 ===================================================================================================
@@ -22,8 +21,9 @@ import matplotlib.pyplot as plt
 
 from src.coefficients import (
     S6_REAL_A, S6_REAL_B, S6_REAL_C,
+    S6_REAL_MANIFOLD_A, S6_REAL_MANIFOLD_B, S6_REAL_MANIFOLD_C,
     STENCIL_D, STENCIL_D2, STENCIL_D2_CENTER,
-    REAL_PURE_14_A, REAL_PURE_14_B, YOSHIDA6_W
+    YOSHIDA_6_A, YOSHIDA_6_B, YOSHIDA6_W
 )
 
 class RealBenchmarkSuite:
@@ -53,26 +53,25 @@ class RealBenchmarkSuite:
         self.fft_count += 1
         return np.fft.ifft(v_hat)
 
-    def integrate_pure_14(self, psi0, n_steps, h, use_fsal=True):
-        from src.coefficients import REAL_PURE_14_A, REAL_PURE_14_B
+    def integrate_yoshida_6(self, psi0, n_steps, h, use_fsal=True):
         v = psi0.copy()
         if not use_fsal or n_steps <= 1:
             for _ in range(n_steps):
-                v = self.step_real_pure_14(v, h)
+                v = self.step_yoshida_6(v, h)
             return v
-        v = self.ifft(self.fft(v) * np.exp(REAL_PURE_14_A[0] * h * self.disp_k))
+        v = self.ifft(self.fft(v) * np.exp(YOSHIDA_6_A[0] * h * self.disp_k))
         for step in range(n_steps):
             for idx in range(6):
                 f1 = self.theta * (v.real**2 + v.imag**2)
-                v *= np.exp(-1j * REAL_PURE_14_B[idx] * h * f1)
-                v = self.ifft(self.fft(v) * np.exp(REAL_PURE_14_A[idx + 1] * h * self.disp_k))
+                v *= np.exp(-1j * YOSHIDA_6_B[idx] * h * f1)
+                v = self.ifft(self.fft(v) * np.exp(YOSHIDA_6_A[idx + 1] * h * self.disp_k))
             f1 = self.theta * (v.real**2 + v.imag**2)
-            v *= np.exp(-1j * REAL_PURE_14_B[6] * h * f1)
+            v *= np.exp(-1j * YOSHIDA_6_B[6] * h * f1)
             if step < n_steps - 1:
-                fused_a = REAL_PURE_14_A[7] + REAL_PURE_14_A[0]
+                fused_a = YOSHIDA_6_A[7] + YOSHIDA_6_A[0]
                 v = self.ifft(self.fft(v) * np.exp(fused_a * h * self.disp_k))
             else:
-                v = self.ifft(self.fft(v) * np.exp(REAL_PURE_14_A[7] * h * self.disp_k))
+                v = self.ifft(self.fft(v) * np.exp(YOSHIDA_6_A[7] * h * self.disp_k))
         return v
 
     def compute_energy(self, psi):
@@ -160,7 +159,33 @@ class RealBenchmarkSuite:
         v *= np.exp(-1j * theta_p)
         return v
 
-    def step_real_pure_14(self, psi, h):
+    def step_real_manifold_33(self, psi, h):
+        v = psi.copy()
+        h2 = h * h
+        for idx in range(6):
+            f1, f2 = self.compute_f1_f2_spectral(v)
+            theta_p = h * (S6_REAL_MANIFOLD_B[idx] * f1 + S6_REAL_MANIFOLD_C[idx] * h2 * f2)
+            v *= np.exp(-1j * theta_p)
+            v = self.ifft(self.fft(v) * np.exp(S6_REAL_MANIFOLD_A[idx] * h * self.disp_k))
+        f1, f2 = self.compute_f1_f2_spectral(v)
+        theta_p = h * (S6_REAL_MANIFOLD_B[6] * f1 + S6_REAL_MANIFOLD_C[6] * h2 * f2)
+        v *= np.exp(-1j * theta_p)
+        return v
+
+    def step_real_manifold_stencil_12(self, psi, h):
+        v = psi.copy()
+        h2 = h * h
+        for idx in range(6):
+            f1, f2 = self.compute_f1_f2_stencil(v)
+            theta_p = h * (S6_REAL_MANIFOLD_B[idx] * f1 + S6_REAL_MANIFOLD_C[idx] * h2 * f2)
+            v *= np.exp(-1j * theta_p)
+            v = self.ifft(self.fft(v) * np.exp(S6_REAL_MANIFOLD_A[idx] * h * self.disp_k))
+        f1, f2 = self.compute_f1_f2_stencil(v)
+        theta_p = h * (S6_REAL_MANIFOLD_B[6] * f1 + S6_REAL_MANIFOLD_C[6] * h2 * f2)
+        v *= np.exp(-1j * theta_p)
+        return v
+
+    def step_yoshida_6(self, psi, h):
         v = psi.copy()
         for idx in range(7):
             w = YOSHIDA6_W[idx]
@@ -194,8 +219,8 @@ def main():
     print('=' * 115)
     print('MODULE 7: S6* REAL GEOMETRIC SPLITTING FAMILY GRAND COMPARATIVE BENCHMARK SUITE')
     print('=' * 115)
-    print('Solvers: S6* Real-Stencil-12 (12 FFTs), S6* Real-Pure-14 (14 FFTs),')
-    print('         S6* Real-Standard-33 (33 FFTs), Yoshida-6 (14 FFTs), Chin-4A (8 FFTs), Strang (2 FFTs)')
+    print('Solvers: S6* Real-Stencil-12 (12 FFTs), S6* Real-Standard-33 (33 FFTs),')
+    print('         Yoshida-6 (14 FFTs), Chin-4A (8 FFTs), Strang (2 FFTs)')
     print('=' * 115)
 
     sim = RealBenchmarkSuite(N=2048, L=80.0, theta=-2.0)
@@ -227,12 +252,13 @@ def main():
     print(f'Gold Reference computed in {t_ref:.2f} s. max|psi| = {np.max(np.abs(psi_ref)):.6f}, norm = {ref_norm:.12f}')
 
     solvers = [
-        ('S6* Real-Stencil-12',  sim.step_real_stencil_12),
-        ('S6* Real-Pure-14',     sim.step_real_pure_14),
-        ('S6* Real-Standard-33', sim.step_real_standard_33),
-        ('Yoshida-6',            sim.step_real_pure_14),
-        ('Chin-4A (4th order)',  sim.step_chin4a),
-        ('Strang (2nd order)',   sim.step_strang),
+        ('S6* Real-Manifold-Stencil-12', sim.step_real_manifold_stencil_12),
+        ('S6* Real-Manifold-33',         sim.step_real_manifold_33),
+        ('S6* Real-Stencil-12',          sim.step_real_stencil_12),
+        ('S6* Real-Standard-33',         sim.step_real_standard_33),
+        ('Yoshida-6',                    sim.step_yoshida_6),
+        ('Chin-4A (4th order)',          sim.step_chin4a),
+        ('Strang (2nd order)',           sim.step_strang),
     ]
 
     results = {}
@@ -250,8 +276,8 @@ def main():
             sim.reset_fft_count()
             t_start = time.perf_counter()
             v = psi0.copy()
-            if 'Pure-14' in name or 'Yoshida-6' in name:
-                v = sim.integrate_pure_14(v, n_steps=n_steps, h=h, use_fsal=True)
+            if 'Yoshida-6' in name:
+                v = sim.integrate_yoshida_6(v, n_steps=n_steps, h=h, use_fsal=True)
             else:
                 for _ in range(n_steps):
                     v = step_fn(v, h)
@@ -299,12 +325,13 @@ def main():
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7), dpi=300)
 
     color_map = {
-        'S6* Real-Stencil-12':  ('#d32f2f', 's-', 2.8),
-        'S6* Real-Pure-14':     ('#388e3c', 'o-', 2.2),
-            'S6* Real-Standard-33': ('#1976d2', 'v-', 2.0),
-        'Yoshida-6':            ('#7b1fa2', 'x-.', 1.8),
-        'Chin-4A (4th order)':  ('#5d4037', '+:', 1.5),
-        'Strang (2nd order)':   ('#757575', 'd:', 1.2),
+        'S6* Real-Manifold-Stencil-12': ('#2e7d32', 'o-', 3.0),
+        'S6* Real-Manifold-33':         ('#00838f', '^-', 2.2),
+        'S6* Real-Stencil-12':          ('#d32f2f', 's--', 2.4),
+        'S6* Real-Standard-33':         ('#1976d2', 'v--', 1.8),
+        'Yoshida-6':                    ('#7b1fa2', 'x-.', 1.8),
+        'Chin-4A (4th order)':          ('#5d4037', '+:', 1.5),
+        'Strang (2nd order)':           ('#757575', 'd:', 1.2),
     }
 
     for name, data in results.items():
@@ -328,28 +355,34 @@ def main():
     plt.suptitle('Figure 7: S6* Real Symplectic Geometric Splitting Family Pareto Frontier (GPE Solitons, N=2048)', fontsize=15, fontweight='bold', y=0.98)
     plt.tight_layout()
 
-    # Save exports
-    for base in ['/mnt/agentdata/tiered/c_a5dcefecf6bdfde0/s6-star-splitting', '/mnt/agentdata/gcs/c_a5dcefecf6bdfde0/s6-star-splitting']:
-        fig_path = f'{base}/figures/figure7_real_grand_pareto.png'
-        os.makedirs(os.path.dirname(fig_path), exist_ok=True)
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-        print(f'[AUTHENTIC EXPORT] Saved Figure 7 to: {fig_path}')
+    # Save to the repo's own figures/ and data/ (no hardcoded container paths)
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    fig_path = os.path.join(repo_root, 'figures', 'figure7_real_grand_pareto.png')
+    os.makedirs(os.path.dirname(fig_path), exist_ok=True)
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+    print(f'[AUTHENTIC EXPORT] Saved Figure 7 to: {fig_path}')
 
-        data_path = f'{base}/data/module7_real_grand_data.npz'
-        os.makedirs(os.path.dirname(data_path), exist_ok=True)
-        np.savez_compressed(
-            data_path,
-            h_ladder=np.array(h_ladder),
-            stencil_12_error=np.array(results['S6* Real-Stencil-12']['error']),
-            stencil_12_ffts=np.array(results['S6* Real-Stencil-12']['ffts']),
-            pure_14_error=np.array(results['S6* Real-Pure-14']['error']),
-            pure_14_ffts=np.array(results['S6* Real-Pure-14']['ffts']),
-            standard_33_error=np.array(results['S6* Real-Standard-33']['error']),
-            standard_33_ffts=np.array(results['S6* Real-Standard-33']['ffts']),
-            chin4a_error=np.array(results['Chin-4A (4th order)']['error']),
-            strang_error=np.array(results['Strang (2nd order)']['error']),
-        )
-        print(f'[AUTHENTIC EXPORT] Saved benchmark data to: {data_path}')
+    data_path = os.path.join(repo_root, 'data', 'module7_real_grand_data.npz')
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    np.savez_compressed(
+        data_path,
+        h_ladder=np.array(h_ladder),
+        manifold_stencil_12_error=np.array(results['S6* Real-Manifold-Stencil-12']['error']),
+        manifold_stencil_12_ffts=np.array(results['S6* Real-Manifold-Stencil-12']['ffts']),
+        manifold_33_error=np.array(results['S6* Real-Manifold-33']['error']),
+        manifold_33_ffts=np.array(results['S6* Real-Manifold-33']['ffts']),
+        stencil_12_error=np.array(results['S6* Real-Stencil-12']['error']),
+        stencil_12_ffts=np.array(results['S6* Real-Stencil-12']['ffts']),
+        yoshida_6_error=np.array(results['Yoshida-6']['error']),
+        yoshida_6_ffts=np.array(results['Yoshida-6']['ffts']),
+        standard_33_error=np.array(results['S6* Real-Standard-33']['error']),
+        standard_33_ffts=np.array(results['S6* Real-Standard-33']['ffts']),
+        chin4a_error=np.array(results['Chin-4A (4th order)']['error']),
+        chin4a_ffts=np.array(results['Chin-4A (4th order)']['ffts']),
+        strang_error=np.array(results['Strang (2nd order)']['error']),
+        strang_ffts=np.array(results['Strang (2nd order)']['ffts']),
+    )
+    print(f'[AUTHENTIC EXPORT] Saved benchmark data to: {data_path}')
 
     plt.close()
     print('=' * 115)
