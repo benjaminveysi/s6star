@@ -2,7 +2,6 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-
 [project]
 name = "s6-star-splitting"
 version = "1.0.0"
@@ -15,4 +14,5 @@ dependencies = [
     "numpy>=1.22.0",
     "scipy>=1.8.0",
     "matplotlib>=3.5.0",
+    "pytest>=7.0.0",
 ]
