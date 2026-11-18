@@ -86,7 +86,7 @@ def main():
     print("-" * 145)
 
     passed_count = 0
-    total_count = 13
+    total_count = 16
 
     # -------------------------------------------------------------------------
     # PART 1: BRANCH I (REAL GEOMETRIC FAMILY & YOSHIDA BASELINE)
@@ -119,6 +119,7 @@ def main():
 
     real_members = [
         ("S6* Real-Standard-33",         gpe.step_standard_33, False, "33 FFTs/step"),
+        ("S6* Real-Manifold-33",         gpe.step_manifold_33, False, "33 FFTs/step"),
         ("Yoshida-6 (1990 Baseline)",    gpe.step_yoshida6,     True,  "14 FFTs/step (FSAL)"),
         ("S6* Real-Stencil-12",          gpe.step_stencil_12,  False, "12 FFTs/step"),
     ]
@@ -371,6 +372,60 @@ def main():
     print("%-32s | %-8s | %-18s | %-8s | p = %5.2f    | %7.5f | max Delta N = %10.2e | [%s]" % (
         "Nonlinear GPE (vs DOP853)", "Yoshida-6", "14 FFTs/step (FSAL)", lvl_str_gpe, res_gpe['order'], res_gpe['r2'], max_def_gpe, status_gpe
     ))
+
+    # 15-16. S6* Real-Standard-33 & Real-Stencil-12 with EXTERNAL POTENTIAL + NONLINEARITY
+    #     (V(x) = 0.5*cos(x) != 0 AND theta = -2.0 != 0) against independent DOP853.
+    #     Regression test for the Frechet f2 cross-term bug (audit 2026-11-18):
+    #     the old code used +4*theta*Vx*rho_x instead of -4*theta*rho*Vxx, which
+    #     drops the order from 6 to 2 exactly in this regime. Every previous test
+    #     had theta*V == 0, so none of them caught it.
+    N_vt = 128
+    L_vt = 2.0 * np.pi
+    V_vt = lambda x: 0.5 * np.cos(x)
+    Vx_vt = lambda x: -0.5 * np.sin(x)
+    Vxx_vt = lambda x: -0.5 * np.cos(x)
+    solver_vt = RealGPESolver(N=N_vt, L=L_vt, theta=-2.0, V=V_vt, Vx=Vx_vt, Vxx=Vxx_vt)
+    x_vt = solver_vt.x
+    k_vt = solver_vt.k
+    psi_vt0 = np.exp(np.sin(x_vt)) + 1j * np.exp(np.cos(x_vt))
+    psi_vt0 /= np.linalg.norm(psi_vt0) * np.sqrt(solver_vt.dx)
+
+    T_vt = 0.16
+    def vt_rhs(t, y):
+        psi = y[:N_vt] + 1j * y[N_vt:]
+        rho = psi.real**2 + psi.imag**2
+        kinetic = np.fft.ifft((k_vt**2) * np.fft.fft(psi))
+        H_psi = kinetic + solver_vt.V * psi - 2.0 * rho * psi
+        dy = -1j * H_psi
+        return np.concatenate([dy.real, dy.imag])
+
+    y0_vt = np.concatenate([psi_vt0.real, psi_vt0.imag])
+    sol_vt = solve_ivp(vt_rhs, (0, T_vt), y0_vt, method='DOP853', rtol=1e-12, atol=1e-12)
+    psi_vt_ref = sol_vt.y[:N_vt, -1] + 1j * sol_vt.y[N_vt:, -1]
+
+    hs_vt = [0.16, 0.08, 0.04, 0.02]
+    for name_vt, step_vt in [("S6* Real-Standard-33 (V+theta)", solver_vt.step_standard_33),
+                             ("S6* Real-Stencil-12 (V+theta)", solver_vt.step_stencil_12)]:
+        errs_vt = []
+        defects_vt = []
+        for h in hs_vt:
+            n_steps = int(round(T_vt / h))
+            v = psi_vt0.copy()
+            for _ in range(n_steps):
+                v = step_vt(v, h)
+            err = np.sqrt(np.sum(np.abs(v - psi_vt_ref)**2) * solver_vt.dx)
+            defect = abs(np.sum(np.abs(v)**2) * solver_vt.dx - 1.0)
+            errs_vt.append(err)
+            defects_vt.append(defect)
+        res_vt = fit_asymptotic_order(hs_vt, errs_vt, expected_order=6)
+        max_def_vt = max(defects_vt)
+        status_vt = "PASSED" if (res_vt['passed'] and max_def_vt < 1e-13) else "FAILED"
+        if status_vt == "PASSED":
+            passed_count += 1
+        lvl_str_vt = "%d/%d" % (res_vt['n_qualifying'], res_vt['total_levels'])
+        print("%-32s | %-8s | %-18s | %-8s | p = %5.2f    | %7.5f | max Delta N = %10.2e | [%s]" % (
+            name_vt, "Real", "33/12 FFTs/step", lvl_str_vt, res_vt['order'], res_vt['r2'], max_def_vt, status_vt
+        ))
 
     # 14. S6* Simplex FSAL Multi-State Equivalence Audit
     mesh_fsal = SimplexMesh2D(Lx=10.0, Ly=10.0, Nx=16, Ny=16, periodic=True)

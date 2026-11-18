@@ -8,4 +8,6 @@ python3 tests/test_simplex_duality.py
 python3 tests/test_adjoint_g.py
 python3 tests/test_krylov_estimator.py
 python3 tests/test_simplex_unified_architecture.py
+python3 tests/test_simplex_commutator_order.py
+python3 -m pytest tests/test_simplex_field_dtype.py -q
 echo "All tests passed successfully!"
