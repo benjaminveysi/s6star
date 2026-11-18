@@ -91,15 +91,14 @@ class BaselinesBenchmarkSuite:
         return v.real
 
     def step_chin4a(self, u, h):
-        t1 = (1.0 / 6.0) * (1.0 - 1.0 / np.sqrt(3.0))
-        t2 = 1.0 / (3.0 * np.sqrt(3.0))
+        # Canonical Chin-4A: single midpoint commutator evaluation (-1/72 h^3),
+        # matching module4. (Was: two +1/48 kicks, which degrades it to order 2.)
         v = self.bernoulli_step(u, (1.0 / 6.0) * h)
         v = self.ifft(self.fft(v) * np.exp(0.5 * h * self.disp_k))
+        v = self.bernoulli_step(v, (1.0 / 3.0) * h)
         g2 = self.compute_g2_spectral(v)
-        v = v + (1.0 / 48.0) * (h ** 3) * g2
-        v = self.bernoulli_step(v, (2.0 / 3.0) * h)
-        g2 = self.compute_g2_spectral(v)
-        v = v + (1.0 / 48.0) * (h ** 3) * g2
+        v = v + (-1.0 / 72.0) * (h ** 3) * g2
+        v = self.bernoulli_step(v, (1.0 / 3.0) * h)
         v = self.ifft(self.fft(v) * np.exp(0.5 * h * self.disp_k))
         v = self.bernoulli_step(v, (1.0 / 6.0) * h)
         return v.real
@@ -404,38 +403,39 @@ def main():
     plt.suptitle('Figure 6: S6* Complex Geometric Splitting Family Pareto Frontier (N=512, T=0.096)', fontsize=15, fontweight='bold', y=0.98)
     plt.tight_layout()
 
-    # Save to both paths
-    for base in ['/mnt/agentdata/tiered/c_a5dcefecf6bdfde0/s6-star-splitting', '/mnt/agentdata/gcs/c_a5dcefecf6bdfde0/s6-star-splitting']:
-        fig_path = f'{base}/figures/figure6_baselines_grand_pareto.png'
-        os.makedirs(os.path.dirname(fig_path), exist_ok=True)
-        plt.savefig(fig_path, dpi=300, bbox_inches='tight')
-        print(f'[AUTHENTIC EXPORT] Saved Figure 6 to: {fig_path}')
+    # Save to the repo's own figures/ and data/ (no hardcoded container paths)
+    import shutil
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    fig_path = os.path.join(repo_root, 'figures', 'figure6_bullet_grand_pareto.png')
+    os.makedirs(os.path.dirname(fig_path), exist_ok=True)
+    plt.savefig(fig_path, dpi=300, bbox_inches='tight')
+    print(f'[AUTHENTIC EXPORT] Saved Figure 6 to: {fig_path}')
 
-        data_path = f'{base}/data/module6_baselines_grand_data.npz'
-        os.makedirs(os.path.dirname(data_path), exist_ok=True)
-        np.savez_compressed(
-            data_path,
-            h_ladder=np.array(h_ladder),
-            castella_blanes_error=np.array(results['Castella-Blanes (2009)']['error']),
-            castella_blanes_ffts=np.array(results['Castella-Blanes (2009)']['ffts']),
-            stencil_error=np.array(results['S6* Complex-Stencil-12']['error']),
-            stencil_ffts=np.array(results['S6* Complex-Stencil-12']['ffts']),
-            flash_error=np.array(results['S6* Complex-Flash-22']['error']),
-            flash_ffts=np.array(results['S6* Complex-Flash-22']['ffts']),
-            standard_error=np.array(results['S6* Complex-Standard-32']['error']),
-            standard_ffts=np.array(results['S6* Complex-Standard-32']['ffts']),
-            bcchm_error=np.array(results['BCChM-6 (P6S7)']['error']),
-            bcchm_ffts=np.array(results['BCChM-6 (P6S7)']['ffts']),
-            itp_castella_blanes=np.array(itp_history['Castella-Blanes (2009)']),
-            itp_stencil=np.array(itp_history['S6* Complex-Stencil-12']),
-            itp_bcchm=np.array(itp_history['BCChM-6 (P6S7)']),
-            itp_standard=np.array(itp_history['S6* Complex-Standard-32']),
-            # Backwards-compatible aliases:
-            real_flash_error=np.array(results['S6* Complex-Stencil-12']['error']),
-            real_flash_ffts=np.array(results['S6* Complex-Stencil-12']['ffts']),
-            itp_real_flash=np.array(itp_history['S6* Complex-Stencil-12']),
-        )
-        print(f'[AUTHENTIC EXPORT] Saved benchmark data to: {data_path}')
+    data_path = os.path.join(repo_root, 'data', 'module6_bullet_grand_data.npz')
+    os.makedirs(os.path.dirname(data_path), exist_ok=True)
+    np.savez_compressed(
+        data_path,
+        h_ladder=np.array(h_ladder),
+        castella_blanes_error=np.array(results['Castella-Blanes (2009)']['error']),
+        castella_blanes_ffts=np.array(results['Castella-Blanes (2009)']['ffts']),
+        stencil_error=np.array(results['S6* Complex-Stencil-12']['error']),
+        stencil_ffts=np.array(results['S6* Complex-Stencil-12']['ffts']),
+        flash_error=np.array(results['S6* Complex-Flash-22']['error']),
+        flash_ffts=np.array(results['S6* Complex-Flash-22']['ffts']),
+        standard_error=np.array(results['S6* Complex-Standard-32']['error']),
+        standard_ffts=np.array(results['S6* Complex-Standard-32']['ffts']),
+        bcchm_error=np.array(results['BCChM-6 (P6S7)']['error']),
+        bcchm_ffts=np.array(results['BCChM-6 (P6S7)']['ffts']),
+        itp_castella_blanes=np.array(itp_history['Castella-Blanes (2009)']),
+        itp_stencil=np.array(itp_history['S6* Complex-Stencil-12']),
+        itp_bcchm=np.array(itp_history['BCChM-6 (P6S7)']),
+        itp_standard=np.array(itp_history['S6* Complex-Standard-32']),
+        # Backwards-compatible aliases:
+        real_flash_error=np.array(results['S6* Complex-Stencil-12']['error']),
+        real_flash_ffts=np.array(results['S6* Complex-Stencil-12']['ffts']),
+        itp_real_flash=np.array(itp_history['S6* Complex-Stencil-12']),
+    )
+    print(f'[AUTHENTIC EXPORT] Saved benchmark data to: {data_path}')
 
     plt.close()
     print('=' * 115)

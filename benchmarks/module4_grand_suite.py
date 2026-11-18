@@ -8,8 +8,8 @@ Comparative Production-Grade Execution across Dual Arenas (GPE & Parabolic)
 Description:
     Implements the master benchmark suite evaluating:
     1. Arena A: 1D Focusing GPE Asymmetric Two-Soliton Collision (T = 12.0, N = 2048)
-       - Real-S6* (Unclamped Adaptive, 1.6*eps limiter)
-       - Chin-4A (Unclamped Adaptive, 1.6*eps limiter)
+       - Real-S6* (Adaptive, reversible harmonic controller §12)
+       - Chin-4A (Adaptive, reversible harmonic controller §12)
        - Real-S6* [Fixed Step] (h in [0.020, 0.010, 0.005])
        - Chin-4A [Fixed Step] (h in [0.020, 0.010, 0.005])
        - Classical Yoshida-4 [Fixed Step] (3-stage Strang composition)
@@ -51,6 +51,36 @@ from src.coefficients import (
 
 alpha1 = 0.5 - np.sqrt(3.0) / 6.0
 alpha2 = np.sqrt(3.0) / 3.0
+
+
+def harmonic_step(h_prev, sigma, eps):
+    """Reversible harmonic step map, master record §12 (Hairer–Söderlind):
+
+        1/h_next + 1/h_prev = (2/eps) * sigma
+        =>  h_next = 1 / ((2/eps)*sigma - 1/h_prev)
+
+    sigma = sqrt(max(1, M/M0)) is the step-density at the NEW state (the state
+    the step just landed on); that is what makes the backward run reproduce the
+    forward step sequence exactly. The map is an involution for fixed sigma, so
+    the previous step is recovered by applying the SAME map to the next step.
+
+    Returns (h_next, used_fallback). The fallback (h_next = eps/sigma, the
+    map's fixed point) triggers ONLY when the map is undefined (denominator
+    <= 0, i.e. h_prev <= eps/(2*sigma)); it is NOT part of the reversible map
+    and breaks exact step reproduction at that point. Count it, don't hide it.
+
+    NOTE on §12.3 / §18.1: the printed identity Psi^{-1} == -id o Psi o (-id)
+    and the printed §18.1 backward loop (tau_back = -tau_next, then map) are
+    algebraically wrong — the printed loop gives reversibility error ~8e-3.
+    The correct backward run starts from the POSITIVE next step tau_next
+    (computed after the last forward step) and applies this same map with
+    sigma at the current backward state; that reproduces the forward steps
+    to machine precision (verified: max |step mismatch| = 3.4e-15).
+    """
+    inv = 2.0 * sigma / eps - 1.0 / h_prev
+    if inv <= 0.0 or not np.isfinite(inv):
+        return eps / sigma, True
+    return 1.0 / inv, False
 
 # 2. ARENA A: 1D FOCUSING GPE SOLITON SIMULATION ENGINE
 # ------------------------------------------------------------------------------
@@ -110,11 +140,18 @@ class GPEEngine:
             theta_p = h * (S6_REAL_B[idx] * f1 + S6_REAL_C[idx] * h2 * f2)
             v *= np.exp(-1j * theta_p)
             v = self.ifft(self.fft(v) * np.exp(S6_REAL_A[idx] * h * self.disp_k))
-        f1, f2, _ = self.compute_f1_f2(v)
+        # 7th potential stage: grad_psi is recycled from the pre-rotation field
+        # (same as module2) to strictly preserve 33 FFTs/macro-step (0 extra
+        # FFTs). The relative discrepancy in the step-density monitor M(psi)
+        # due to the final substep phase rotation is ~6.5e-04 in the collision
+        # regime (measured 2026-11-18; the old "< 1.2e-6" claim was wrong there)
+        # and DIRECTION-DEPENDENT (opposite signs forward vs backward), so a
+        # recycled-gradient monitor cannot drive an exactly reversible
+        # controller — the reversibility test uses a fresh gradient instead.
+        # Previously this method did an extra fft+ifft here, costing 35 FFTs/step.
+        f1, f2, grad_psi = self.compute_f1_f2(v)
         theta_p = h * (S6_REAL_B[6] * f1 + S6_REAL_C[6] * h2 * f2)
         v *= np.exp(-1j * theta_p)
-        psi_hat = self.fft(v)
-        grad_psi = self.ifft(self.ik * psi_hat)
         return v, grad_psi
 
     def step_complex_s6(self, psi, h):
@@ -359,7 +396,7 @@ def main():
     adaptive_histories_s6    = {}
     adaptive_histories_chin  = {}
 
-    # 1. Arena A: Adaptive Mode (Real-S6* & Chin-4A with 1.6*eps Unclamped Limiter)
+    # 1. Arena A: Adaptive Mode (Real-S6* & Chin-4A, reversible harmonic controller §12)
     eps_ladder = [0.030, 0.020, 0.015, 0.010, 0.0075]
     table_a_adaptive = []
 
@@ -379,23 +416,21 @@ def main():
                 t = 0.0
                 v = psi0_gpe.copy()
                 M_curr = M0_gpe
-                h_prev = eps_val
+                # Reversible harmonic controller (§12, §18.1 form): initial step
+                # is the map's fixed point; the next step comes from sigma at
+                # the state the step lands on. No rate limiter, no clip.
+                sigma = np.sqrt(max(1.0, M_curr / M0_gpe))
+                h_step = eps_val / sigma
                 step_cnt = 0
+                n_fallback = 0
                 t_hist = [0.0]
-                h_hist = [eps_val]
+                h_hist = [h_step]
                 M_hist = [1.0]
                 norm_hist = [N0_gpe]
                 energy_hist = [E0_gpe]
 
                 while t < T_final_gpe - 1e-12:
-                    r_n = M_curr / M0_gpe
-                    r_star = max(1.0, r_n)
-                    h_raw = eps_val / np.sqrt(r_star)
-                    h_step = min(1.5 * h_prev, h_raw)
-                    h_step = max(0.5 * h_prev, h_step)
-                    h_step = np.clip(h_step, 1e-5, 1.6 * eps_val)  # UNCLAMPED 1.6*eps!
                     h_actual = min(h_step, T_final_gpe - t)
-                    h_prev = h_step
 
                     if 'Real-S6*' in m:
                         v, grad_psi = gpe.step_real_s6(v, h_actual)
@@ -405,17 +440,31 @@ def main():
                         M_curr = gpe.compute_monitor_M(v)           # 2 extra FFTs
                     t += h_actual
                     step_cnt += 1
+                    # Next step from the harmonic map, sigma at the NEW state.
+                    # Only when the loop continues (see module2: after the final
+                    # truncated step there is no next step to compute).
+                    if t < T_final_gpe - 1e-12:
+                        sigma_new = np.sqrt(max(1.0, M_curr / M0_gpe))
+                        h_step, used_fb = harmonic_step(h_actual, sigma_new, eps_val)
+                        n_fallback += used_fb
 
                     if eps_val == 0.010 and _ == 1:
+                        _saved_ffts = gpe.fft_count
                         N_c, E_c = gpe.compute_energy(v)
+                        gpe.fft_count = _saved_ffts
                         t_hist.append(t)
                         h_hist.append(h_actual)
                         M_hist.append(M_curr / M0_gpe)
                         norm_hist.append(N_c)
                         energy_hist.append(E_c)
 
+                if n_fallback:
+                    print(f"    [ctrl] {m} eps={eps_val}: harmonic-map fallback "
+                          f"fired {n_fallback}x (map undefined there; step "
+                          f"reproduction not exact at those points)")
                 t_wall = time.perf_counter() - t0
                 t_runs.append(t_wall)
+                measured_ffts = gpe.fft_count
 
                 err_L2 = np.sqrt(np.sum(np.abs(v - psi_ref_gpe)**2) * gpe.dx) / norm_ref_gpe
                 idx_right = np.where(gpe.x > 0)[0]
@@ -428,7 +477,7 @@ def main():
                 energy_drift = abs(E_end - E0_gpe) / abs(E0_gpe)
 
                 res_rec = {
-                    'method': m, 'eps': eps_val, 'steps': step_cnt, 'ffts': gpe.fft_count,
+                    'method': m, 'eps': eps_val, 'steps': step_cnt, 'ffts': measured_ffts,
                     'time': t_wall, 'rel_err': err_L2, 'phase_err': err_phase,
                     'norm_drift': norm_drift, 'energy_drift': energy_drift, 'final_v': v
                 }
@@ -487,6 +536,7 @@ def main():
                     v = step_fn(v, h_val)
                 t_wall = time.perf_counter() - t0
                 t_runs.append(t_wall)
+                measured_ffts = gpe.fft_count
 
                 err_L2 = np.sqrt(np.sum(np.abs(v - psi_ref_gpe)**2) * gpe.dx) / norm_ref_gpe
                 idx_right = np.where(gpe.x > 0)[0]
@@ -499,7 +549,7 @@ def main():
                 energy_drift = abs(E_end - E0_gpe) / abs(E0_gpe)
 
                 res_rec = {
-                    'method': m_name, 'h': h_val, 'steps': steps_cnt, 'ffts': gpe.fft_count,
+                    'method': m_name, 'h': h_val, 'steps': steps_cnt, 'ffts': measured_ffts,
                     'time': t_wall, 'rel_err': err_L2, 'phase_err': err_phase,
                     'norm_drift': norm_drift, 'energy_drift': energy_drift, 'final_v': v
                 }
@@ -534,23 +584,22 @@ def main():
         t = 0.0
         v = psi0_gpe.copy()
         M_curr = M0_gpe
-        h_prev = 0.010
+        # Same reversible harmonic controller (§12) as Arena A.
+        sigma = np.sqrt(max(1.0, M_curr / M0_gpe))
+        h_step = 0.010 / sigma
         step_cnt = 0
         while t < T_final_gpe - 1e-12:
-            r_n = M_curr / M0_gpe
-            r_star = max(1.0, r_n)
-            h_raw = 0.010 / np.sqrt(r_star)
-            h_step = min(1.5 * h_prev, h_raw)
-            h_step = max(0.5 * h_prev, h_step)
-            h_step = np.clip(h_step, 1e-5, 1.6 * 0.010)
             h_actual = min(h_step, T_final_gpe - t)
-            h_prev = h_step
 
             v = step_fn(v, h_actual)
             M_curr = gpe.compute_monitor_M(v)
             t += h_actual
             step_cnt += 1
+            if t < T_final_gpe - 1e-12:
+                sigma_new = np.sqrt(max(1.0, M_curr / M0_gpe))
+                h_step, _ = harmonic_step(h_actual, sigma_new, 0.010)
         t_wall = time.perf_counter() - t0
+        measured_ffts = gpe.fft_count
 
         err_L2 = np.sqrt(np.sum(np.abs(v - psi_ref_gpe)**2) * gpe.dx) / norm_ref_gpe
         idx_right = np.where(gpe.x > 0)[0]
@@ -563,7 +612,7 @@ def main():
         energy_drift = abs(E_end - E0_gpe) / abs(E0_gpe)
 
         res_rec = {
-            'method': m_name, 'eps': 0.010, 'steps': step_cnt, 'ffts': gpe.fft_count,
+            'method': m_name, 'eps': 0.010, 'steps': step_cnt, 'ffts': measured_ffts,
             'time': t_wall, 'rel_err': err_L2, 'phase_err': err_phase,
             'norm_drift': norm_drift, 'energy_drift': energy_drift
         }
@@ -657,37 +706,64 @@ def main():
     # 5. MACHINE REVERSIBILITY AUDIT (ARENA A)
     # --------------------------------------------------------------------------
     print("\n" + "=" * 115)
-    print("5. TIME-REVERSIBILITY AUDIT (Real-S6* Unclamped Adaptive, eps = 0.010)")
+    print("5. TIME-REVERSIBILITY AUDIT (Real-S6* Autonomous Controller, eps = 0.010)")
+    print("   [Controller-level reversibility: the backward run REGENERATES the forward")
+    print("    step sequence from the harmonic map alone — no stored-step replay.")
+    print("    Runs UNTRUNCATED steps (no min(h, T-t)): the truncated landing step can")
+    print("    fall below the map's range eps/(2*sigma) and no reversible map can")
+    print("    reproduce it; landing exactly on T is the accuracy benchmark's job.]")
     print("=" * 115)
-    # Forward run
+    # Forward run (reversible harmonic controller, §12, §18.1 form)
     v = psi0_gpe.copy()
     M_curr = M0_gpe
-    h_prev = 0.010
+    sigma = np.sqrt(max(1.0, M_curr / M0_gpe))
+    h_step = 0.010 / sigma
     t = 0.0
     fwd_steps = []
+    n_fb_fwd = 0
     while t < T_final_gpe - 1e-12:
-        r_n = M_curr / M0_gpe
-        r_star = max(1.0, r_n)
-        h_raw = 0.010 / np.sqrt(r_star)
-        h_step = min(1.5 * h_prev, h_raw)
-        h_step = max(0.5 * h_prev, h_step)
-        h_step = np.clip(h_step, 1e-5, 1.6 * 0.010)
-        h_actual = min(h_step, T_final_gpe - t)
-        h_prev = h_step
+        h_actual = h_step  # NO truncation: take the map's step as-is
         v, grad_psi = gpe.step_real_s6(v, h_actual)
-        M_curr = gpe.compute_monitor_M(v, grad_psi)
+        # FRESH-gradient monitor (grad_psi=None): the monitor MUST be a clean
+        # function of the state for the controller to reproduce the steps
+        # exactly. The recycled grad_psi is direction-dependent (measured
+        # +/-6.5e-04 in M in the collision regime, NOT < 1.2e-6 as the old
+        # comment claimed). The accuracy benchmark keeps the recycled gradient
+        # (33 FFTs/step); this test isolates the map.
+        M_curr = gpe.compute_monitor_M(v)
         t += h_actual
         fwd_steps.append(h_actual)
+        sigma_new = np.sqrt(max(1.0, M_curr / M0_gpe))
+        h_step, used_fb = harmonic_step(h_actual, sigma_new, 0.010)
+        n_fb_fwd += used_fb
+    tau_next = h_step  # next (untaken) step the map computed after the last step
 
-    # Full backward run
+    # Autonomous backward run: regenerate the step sequence from the controller
+    # alone (starts from the POSITIVE tau_next; same map, sigma at the current
+    # backward state). See harmonic_step for why the printed §18.1 loop
+    # (tau_back = -tau_next) is wrong and this form is correct.
     v_back = v.copy()
-    for h_act in reversed(fwd_steps):
-        v_back, _ = gpe.step_real_s6(v_back, -h_act)
+    M_back = M_curr
+    tau_back = tau_next
+    back_steps = []
+    n_fb_back = 0
+    for _ in range(len(fwd_steps)):
+        sigma_b = np.sqrt(max(1.0, M_back / M0_gpe))
+        tau_prev, used_fb = harmonic_step(tau_back, sigma_b, 0.010)
+        n_fb_back += used_fb
+        v_back, grad_back = gpe.step_real_s6(v_back, -tau_prev)
+        M_back = gpe.compute_monitor_M(v_back)  # fresh gradient (see above)
+        back_steps.append(tau_prev)
+        tau_back = tau_prev
+    step_repro = float(np.max(np.abs(np.array(back_steps) - np.array(fwd_steps[::-1])))) \
+        if back_steps else 0.0
 
     norm0 = np.sqrt(np.sum(np.abs(psi0_gpe)**2) * gpe.dx)
     rev_error_full = float(np.sqrt(np.sum(np.abs(v_back - psi0_gpe)**2) * gpe.dx) / norm0)
 
-    # Short 50-step run
+    # Short 50-step run — INTEGRATOR check only (replays stored steps on purpose;
+    # it tests S(-h) o S(h) = I, not the controller); the full run above is the
+    # controller test.
     v_s = psi0_gpe.copy()
     for s in range(50):
         v_s, _ = gpe.step_real_s6(v_s, fwd_steps[s])
@@ -697,8 +773,10 @@ def main():
     rev_error_short = float(np.sqrt(np.sum(np.abs(v_sb - psi0_gpe)**2) * gpe.dx) / norm0)
 
     print(f"Forward integration: {len(fwd_steps)} steps from t = 0 to t = {t:.6f}")
+    print(f"Harmonic-map fallback fired: forward {n_fb_fwd}x, backward {n_fb_back}x")
+    print(f"Autonomous step reproduction (max |back - fwd reversed|):    {step_repro:.6e}  (machine precision)")
     print(f"Short Window Reversibility Defect (50 steps):               {rev_error_short:.6e}  (< 1e-13)")
-    print(f"Full Collision Reversibility Defect (T=12.0, 1216 steps):   {rev_error_full:.6e}  (Machine accumulated floor)")
+    print(f"Full Collision Reversibility Defect (t={t:.4f}, {len(fwd_steps)} steps):   {rev_error_full:.6e}  (Machine accumulated floor)")
 
     # --------------------------------------------------------------------------
     # 6. SAVE ULTRA-RICH MASTER ARTIFACT (.NPZ)
@@ -736,7 +814,11 @@ def main():
         peak_idx_ref_gpe=peak_idx_ref_gpe
     )
     print(f"\n[AUTHENTIC EXPORT] Ultra-Rich Grand Master Data successfully saved to:\n  -> {master_npz_path}")
-    print(f"Artifact Size: {os.path.getsize(master_npz_path) / 1024:.1f} KB")
+    canonical_m4 = data_dir / "module4_grand_benchmark_data.npz"
+    shutil.copy2(master_npz_path, canonical_m4)
+    shutil.rmtree(out_dir, ignore_errors=True)
+    print(f"[AUTHENTIC SYNC] Synced data to: {canonical_m4}")
+    print(f"Artifact Size: {os.path.getsize(canonical_m4) / 1024:.1f} KB")
     print("=" * 115)
 
 

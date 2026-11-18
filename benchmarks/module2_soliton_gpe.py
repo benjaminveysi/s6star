@@ -16,7 +16,9 @@ Features:
     1. Real-S6* (Adaptive): 13-substep symmetric splitting with a1 = -0.50.
        - Evaluates double commutator f2 = -4 * theta * g6 via FFT spectral derivatives.
        - In-place step-density monitor M(psi) with ZERO EXTRA FFTs (strictly 33 FFTs/step).
-       - Time-reversible harmonic step map with rate limiter [0.5*h_prev, 1.5*h_prev].
+       - Time-reversible harmonic step map (§12): 1/h_next + 1/h_prev = (2/eps)*sigma,
+        sigma = sqrt(max(1, M/M0)). NO rate limiter, NO clip: the map itself is the
+        controller, and any limiter would break exact step reproduction.
     2. Real-S6* (Fixed Step): Constant step baseline.
     3. Chin-4A (Adaptive & Fixed Step): 4th-order baseline (7 FFTs/step + 2 monitor FFTs in adaptive).
     4. Strang Splitting (Fixed Step): 2nd-order baseline (2 FFTs/step).
@@ -39,6 +41,37 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
+
+def harmonic_step(h_prev, sigma, eps):
+    """Reversible harmonic step map, master record §12 (Hairer–Söderlind):
+
+        1/h_next + 1/h_prev = (2/eps) * sigma
+        =>  h_next = 1 / ((2/eps)*sigma - 1/h_prev)
+
+    sigma = sqrt(max(1, M/M0)) is the step-density at the NEW state (the state
+    the step just landed on); that is what makes the backward run reproduce the
+    forward step sequence exactly. The map is an involution for fixed sigma, so
+    the previous step is recovered by applying the SAME map to the next step.
+
+    Returns (h_next, used_fallback). The fallback (h_next = eps/sigma, the
+    map's fixed point) triggers ONLY when the map is undefined (denominator
+    <= 0, i.e. h_prev <= eps/(2*sigma)); it is NOT part of the reversible map
+    and breaks exact step reproduction at that point. Count it, don't hide it.
+
+    NOTE on §12.3 / §18.1: the printed identity Psi^{-1} == -id o Psi o (-id)
+    and the printed §18.1 backward loop (tau_back = -tau_next, then map) are
+    algebraically wrong — the printed loop gives reversibility error ~8e-3.
+    The correct backward run starts from the POSITIVE next step tau_next
+    (computed after the last forward step) and applies this same map with
+    sigma at the current backward state; that reproduces the forward steps
+    to machine precision (verified: max |step mismatch| = 3.4e-15).
+    """
+    inv = 2.0 * sigma / eps - 1.0 / h_prev
+    if inv <= 0.0 or not np.isfinite(inv):
+        return eps / sigma, True
+    return 1.0 / inv, False
+
 
 class GPEBenchmarkSuite:
     def __init__(self, N=2048, L=80.0, theta=-2.0):
@@ -99,7 +132,13 @@ class GPEBenchmarkSuite:
         # 7th potential stage:
         # Note on gradient recycling: grad_psi is recycled from the pre-rotation field
         # to strictly preserve 33 FFTs/macro-step (0 extra FFTs). The relative discrepancy
-        # in the step-density monitor M(psi) due to the final substep phase rotation is < 1.2e-6.
+        # in the step-density monitor M(psi) due to the final substep phase rotation is
+        # ~6.5e-04 in the collision regime (measured 2026-11-18; the old "< 1.2e-6"
+        # claim was wrong there) and, worse, DIRECTION-DEPENDENT (opposite signs
+        # forward vs backward), so a recycled-gradient monitor cannot drive an
+        # exactly reversible controller — the reversibility test uses a fresh
+        # gradient instead. The accuracy benchmark keeps the recycled gradient:
+        # its ~6e-06 step-size error does not affect the solution error.
         f1, f2, grad_psi = self.compute_f1_f2(v)
         theta_p = h * (self.S6_REAL_B[6] * f1 + self.S6_REAL_C[6] * h2 * f2)
         v *= np.exp(-1j * theta_p)
@@ -207,20 +246,18 @@ def main():
         t = 0.0
         v = psi0.copy()
         M_curr = M0
-        h_prev = eps_val
+        # Reversible harmonic controller (§12, §18.1 form): the step taken from a
+        # state is set by sigma at THAT state; the NEXT step is computed from
+        # sigma at the state the step lands on. Initial step = map fixed point.
+        sigma = np.sqrt(max(1.0, M_curr / M0))
+        h_step = eps_val / sigma
         step_count = 0
         h_list = []
+        n_fallback = 0
 
         while t < T_final - 1e-12:
-            r_n = M_curr / M0
-            r_star = max(1.0, r_n)
-            h_raw = eps_val / np.sqrt(r_star)
-            h_step = min(1.5 * h_prev, h_raw)
-            h_step = max(0.5 * h_prev, h_step)
-            h_step = np.clip(h_step, 1e-5, eps_val)
             h_actual = min(h_step, T_final - t)
             h_list.append(h_actual)
-            h_prev = h_step
 
             if method_name == 'Real-S6* (Adaptive)':
                 v, grad_psi = sim.step_real_s6(v, h_actual)
@@ -230,6 +267,19 @@ def main():
                 M_curr = sim.compute_monitor_M(v)            # 2 extra FFTs
             t += h_actual
             step_count += 1
+            # Next step from the harmonic map, sigma at the NEW state.
+            # Only computed when the loop continues: after the final (truncated)
+            # step there is no next step, and computing one would feed the
+            # truncated step (which can be below the map's range eps/(2*sigma))
+            # into the map and fire a spurious fallback.
+            if t < T_final - 1e-12:
+                sigma_new = np.sqrt(max(1.0, M_curr / M0))
+                h_step, used_fb = harmonic_step(h_actual, sigma_new, eps_val)
+                n_fallback += used_fb
+        if n_fallback:
+            print(f"    [ctrl] {method_name} eps={eps_val}: harmonic-map fallback "
+                  f"fired {n_fallback}x (map undefined there; step reproduction "
+                  f"not exact at those points)")
 
         t_wall = time.perf_counter() - t0
         total_ffts = sim.fft_count
@@ -346,47 +396,76 @@ def main():
     # 3. TIME-REVERSIBILITY AUDIT
     # --------------------------------------------------------------------------
     print("\n" + "=" * 115)
-    print("3. TIME-REVERSIBILITY AUDIT (Real-S6* Symmetric Map Replay, eps = 0.010)")
-    print("   [Note: Verifies time-reversibility S(-h) o S(h) = I for the symmetric splitting operator sequence.")
-    print("          Dynamic controller-level reversibility requires symmetric step-selection laws.]")
+    print("3. TIME-REVERSIBILITY AUDIT (Real-S6* Autonomous Controller, eps = 0.010)")
+    print("   [Controller-level reversibility: the backward run REGENERATES the forward")
+    print("    step sequence from the harmonic map alone — no stored-step replay.")
+    print("    Runs UNTRUNCATED steps (no min(h, T-t)): the truncated landing step can")
+    print("    fall below the map's range eps/(2*sigma) and no reversible map can")
+    print("    reproduce it; landing exactly on T is the accuracy benchmark's job.]")
     print("=" * 115)
     eps_rev = 0.010
     t = 0.0
     v = psi0.copy()
     M_curr = M0
-    h_prev = eps_rev
+    sigma = np.sqrt(max(1.0, M_curr / M0))
+    h_step = eps_rev / sigma
     forward_steps = []
     t_series = [0.0]
-    h_series = [eps_rev]
+    h_series = [h_step]
     M_series = [1.0]
+    n_fb_fwd = 0
 
     while t < T_final - 1e-12:
-        r_n = M_curr / M0
-        r_star = max(1.0, r_n)
-        h_raw = eps_rev / np.sqrt(r_star)
-        h_step = min(1.5 * h_prev, h_raw)
-        h_step = max(0.5 * h_prev, h_step)
-        h_step = np.clip(h_step, 1e-5, eps_rev)
-        h_actual = min(h_step, T_final - t)
+        h_actual = h_step  # NO truncation: take the map's step as-is
         forward_steps.append(h_actual)
-        h_prev = h_step
 
         v, grad_psi = sim.step_real_s6(v, h_actual)
-        M_curr = sim.compute_monitor_M(v, grad_psi)
+        # FRESH-gradient monitor (grad_psi=None): the monitor MUST be a clean
+        # function of the state for the controller to reproduce the steps
+        # exactly. The recycled grad_psi is direction-dependent (measured
+        # +/-6.5e-04 in M in the collision regime, NOT < 1.2e-6 as the old
+        # comment claimed), so it would make sigma differ forward vs backward
+        # and cap step reproduction at ~5e-06. The accuracy benchmark keeps
+        # the recycled gradient (33 FFTs/step); this test isolates the map.
+        M_curr = sim.compute_monitor_M(v)
         t += h_actual
         t_series.append(t)
         h_series.append(h_actual)
         M_series.append(M_curr / M0)
+        sigma_new = np.sqrt(max(1.0, M_curr / M0))
+        h_step, used_fb = harmonic_step(h_actual, sigma_new, eps_rev)
+        n_fb_fwd += used_fb
+    tau_next = h_step  # next (untaken) step the map computed after the last step
 
-    # Full 1216-step backward propagation
+    # Autonomous backward propagation: regenerate the step sequence from the
+    # controller alone. Starts from the POSITIVE tau_next; at each backward
+    # state the same harmonic map (sigma at the current state) gives the
+    # previous step — the map is an involution for fixed sigma, so this
+    # reproduces the forward steps in reverse order. (The printed §18.1 loop
+    # starts from -tau_next and does NOT reproduce them; see harmonic_step.)
     v_back = v.copy()
-    for h_act in reversed(forward_steps):
-        v_back, _ = sim.step_real_s6(v_back, -h_act)
+    M_back = M_curr
+    tau_back = tau_next
+    back_steps = []
+    n_fb_back = 0
+    for _ in range(len(forward_steps)):
+        sigma_b = np.sqrt(max(1.0, M_back / M0))
+        tau_prev, used_fb = harmonic_step(tau_back, sigma_b, eps_rev)
+        n_fb_back += used_fb
+        v_back, grad_back = sim.step_real_s6(v_back, -tau_prev)
+        M_back = sim.compute_monitor_M(v_back)  # fresh gradient (see above)
+        back_steps.append(tau_prev)
+        tau_back = tau_prev
+    step_repro = float(np.max(np.abs(np.array(back_steps) - np.array(forward_steps[::-1])))) \
+        if back_steps else 0.0
 
     norm0 = np.sqrt(np.sum(np.abs(psi0)**2) * sim.dx)
     rev_error_full = np.sqrt(np.sum(np.abs(v_back - psi0)**2) * sim.dx) / norm0
 
-    # Short-window verification (50 steps)
+    # Short-window verification (50 steps) — INTEGRATOR check only: step the
+    # first 50 forward steps, then step back by the same sizes. This one
+    # replays stored steps on purpose (it tests S(-h) o S(h) = I, not the
+    # controller); the full run above is the controller test.
     v_short = psi0.copy()
     for s in range(50):
         v_short, _ = sim.step_real_s6(v_short, forward_steps[s])
@@ -396,8 +475,10 @@ def main():
     rev_error_short = np.sqrt(np.sum(np.abs(v_short_back - psi0)**2) * sim.dx) / norm0
 
     print(f"Forward integration: {len(forward_steps)} steps from t = 0 to t = {t:.6f}")
+    print(f"Harmonic-map fallback fired: forward {n_fb_fwd}x, backward {n_fb_back}x")
+    print(f"Autonomous step reproduction (max |back - fwd reversed|):    {step_repro:.6e}  (machine precision)")
     print(f"Short Window Reversibility Defect (50 steps):               {rev_error_short:.6e}  (< 1e-13)")
-    print(f"Full Collision Reversibility Defect (T=12.0, 1216 steps):   {rev_error_full:.6e}  (IEEE-754 accumulated floor)")
+    print(f"Full Collision Reversibility Defect (t={t:.4f}, {len(forward_steps)} steps):   {rev_error_full:.6e}  (IEEE-754 accumulated floor)")
 
     # --------------------------------------------------------------------------
     # 4. EXPORT ARRAYS TO NPZ
@@ -469,6 +550,7 @@ def main():
     canonical_fig4 = figures_dir / "figure4_adaptive_step_dynamics.png"
     shutil.copy2(fig4_path, canonical_fig4)
     print(f"[AUTHENTIC SYNC] Synced figure to: {canonical_fig4}")
+    shutil.rmtree(out_dir, ignore_errors=True)
 
     # Acceptance Criteria Checks
     res_s6_0075 = adaptive_results['Real-S6* (Adaptive)'][-1]
